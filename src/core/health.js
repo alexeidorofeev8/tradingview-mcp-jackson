@@ -2,7 +2,7 @@
  * Core health/discovery/launch logic.
  */
 import { getClient, getTargetInfo, evaluate } from '../connection.js';
-import { existsSync } from 'fs';
+import { existsSync, readdirSync } from 'fs';
 import { execSync, spawn } from 'child_process';
 
 export async function healthCheck() {
@@ -187,6 +187,18 @@ export async function launch({ port, kill_existing } = {}) {
   const candidates = pathMap[platform] || pathMap.linux;
   for (const p of candidates) {
     if (p && existsSync(p)) { tvPath = p; break; }
+  }
+
+  // Microsoft Store (WindowsApps) fallback for Windows
+  if (!tvPath && platform === 'win32') {
+    try {
+      const base = `${process.env.PROGRAMFILES}\\WindowsApps`;
+      const dirs = readdirSync(base).filter(d => d.startsWith('TradingView.Desktop_'));
+      for (const d of dirs) {
+        const p = `${base}\\${d}\\TradingView.exe`;
+        if (existsSync(p)) { tvPath = p; break; }
+      }
+    } catch { /* no access to WindowsApps */ }
   }
 
   if (!tvPath) {
