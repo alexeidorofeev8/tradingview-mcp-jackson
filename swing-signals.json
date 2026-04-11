@@ -1,0 +1,172 @@
+{
+  "scanned_at": "2026-04-11T00:52:13.186Z",
+  "market": {
+    "vix": 19.23,
+    "vixOk": true,
+    "spyAboveEma200": true,
+    "timestamp": "2026-04-11T00:50:24.460Z"
+  },
+  "signals": [],
+  "all": [
+    {
+      "symbol": "NYSE:JPM",
+      "result": {
+        "signal": "BLOCKED",
+        "reason": "Earnings until 2026-04-16",
+        "indicators": {
+          "ema200": 299.32,
+          "ema50": 298.89,
+          "ema20": 297.02,
+          "wr": -4.7,
+          "rsi2": 89.3,
+          "atr": 7.13,
+          "volRatio": 0.6
+        }
+      }
+    },
+    {
+      "symbol": "NYSE:BAC",
+      "result": {
+        "signal": "BLOCKED",
+        "reason": "Earnings until 2026-04-17",
+        "indicators": {
+          "ema200": 50.27,
+          "ema50": 50.36,
+          "ema20": 49.77,
+          "wr": -4.9,
+          "rsi2": 84,
+          "atr": 1.19,
+          "volRatio": 0.66
+        }
+      }
+    },
+    {
+      "symbol": "NYSE:GS",
+      "result": {
+        "signal": "BLOCKED",
+        "reason": "Earnings until 2026-04-15",
+        "indicators": {
+          "ema200": 801.61,
+          "ema50": 863.6,
+          "ema20": 858.76,
+          "wr": -8.6,
+          "rsi2": 92.1,
+          "atr": 26.32,
+          "volRatio": 0.82
+        }
+      }
+    },
+    {
+      "symbol": "NYSE:XOM",
+      "result": {
+        "signal": "BLOCKED",
+        "reason": "Earnings until 2026-05-04",
+        "indicators": {
+          "ema200": 127.11,
+          "ema50": 152.57,
+          "ema20": 159.34,
+          "wr": -94,
+          "rsi2": 4.6,
+          "atr": 6.16,
+          "volRatio": 0.8
+        }
+      }
+    },
+    {
+      "symbol": "NYSE:CVX",
+      "result": {
+        "signal": "BLOCKED",
+        "reason": "Earnings until 2026-05-04",
+        "indicators": {
+          "ema200": 165.54,
+          "ema50": 190.04,
+          "ema20": 197.44,
+          "wr": -92.6,
+          "rsi2": 6.8,
+          "atr": 6.79,
+          "volRatio": 0.76
+        }
+      }
+    },
+    {
+      "symbol": "NYSE:JNJ",
+      "result": {
+        "signal": "BLOCKED",
+        "reason": "Earnings until 2026-04-17",
+        "indicators": {
+          "ema200": 200.72,
+          "ema50": 236.5,
+          "ema20": 240.53,
+          "wr": -58.4,
+          "rsi2": 18.4,
+          "atr": 4.22,
+          "volRatio": 0.98
+        }
+      }
+    },
+    {
+      "symbol": "NYSE:PG",
+      "result": {
+        "signal": "BLOCKED",
+        "reason": "Earnings until 2026-04-25",
+        "indicators": {
+          "ema200": 151.94,
+          "ema50": 149.18,
+          "ema20": 146.19,
+          "wr": -28.7,
+          "rsi2": 50.6,
+          "atr": 2.47,
+          "volRatio": 0.87
+        }
+      }
+    },
+    {
+      "symbol": "NYSE:KO",
+      "result": {
+        "signal": "BLOCKED",
+        "reason": "Earnings until 2026-05-01",
+        "indicators": {
+          "ema200": 71.93,
+          "ema50": 76.26,
+          "ema20": 76.74,
+          "wr": -19.4,
+          "rsi2": 49.1,
+          "atr": 1.33,
+          "volRatio": 0.74
+        }
+      }
+    },
+    {
+      "symbol": "WMT",
+      "result": {
+        "signal": "BLOCKED",
+        "reason": "Earnings until 2026-05-20",
+        "indicators": {
+          "ema200": 110.36,
+          "ema50": 123.43,
+          "ema20": 124.93,
+          "wr": -27.4,
+          "rsi2": 43.6,
+          "atr": 2.76,
+          "volRatio": 0.72
+        }
+      }
+    },
+    {
+      "symbol": "NYSE:HD",
+      "result": {
+        "signal": "BLOCKED",
+        "reason": "Earnings until 2026-05-20",
+        "indicators": {
+          "ema200": 367.93,
+          "ema50": 348.1,
+          "ema20": 335.07,
+          "wr": -15,
+          "rsi2": 64.8,
+          "atr": 9.72,
+          "volRatio": 0.77
+        }
+      }
+    }
+  ]
+}

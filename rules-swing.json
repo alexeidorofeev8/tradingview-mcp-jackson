@@ -1,0 +1,80 @@
+{
+  "strategy": {
+    "name": "NYSE Swing: EMA200 + Williams %R",
+    "version": "1.0",
+    "description": "Свинг на дневном таймфрейме. Торгуем только по тренду (EMA 200). Ищем откаты к EMA 50 с перепроданностью по Williams %R и RSI(2). Стоп по ATR или swing-лоу. R:R минимум 1:2.",
+    "timeframe": "D",
+    "entry_timeframe": "D",
+    "horizon": "2–10 рабочих дней"
+  },
+
+  "watchlist": [
+    "NYSE:JPM",
+    "NYSE:BAC",
+    "NYSE:GS",
+    "NYSE:XOM",
+    "NYSE:CVX",
+    "NYSE:JNJ",
+    "NYSE:PG",
+    "NYSE:KO",
+    "WMT",
+    "NYSE:HD"
+  ],
+
+  "market_filters": {
+    "spy_symbol": "AMEX:SPY",
+    "vix_symbol": "CBOE:VIX",
+    "vix_max": 25,
+    "spy_ema_period": 200,
+    "_note": "При SPY ниже EMA200 или VIX выше 25 — long-сигналы блокируются. Short только при SPY < EMA200."
+  },
+
+  "parameters": {
+    "ema_trend": 200,
+    "ema_pullback_slow": 50,
+    "ema_pullback_fast": 20,
+    "wr_period": 14,
+    "wr_oversold": -80,
+    "wr_overbought": -20,
+    "rsi_period": 2,
+    "rsi_oversold": 15,
+    "rsi_overbought": 85,
+    "atr_period": 14,
+    "atr_stop_mult": 2.0,
+    "volume_sma_period": 20,
+    "volume_min_ratio": 0.8,
+    "pullback_zone_atr_mult": 1.0,
+    "_note": "pullback_zone_atr_mult: цена должна быть в пределах N×ATR от EMA50"
+  },
+
+  "risk": {
+    "capital": 10000,
+    "risk_per_trade_pct": 1.0,
+    "max_open_trades": 3,
+    "tp1_rr": 2.0,
+    "tp2_rr": 3.0,
+    "tp1_close_pct": 50,
+    "_note": "На TP1 закрываем 50% позиции, остаток трейлим по EMA20. Риск 1% капитала на сделку."
+  },
+
+  "earnings_blackout": {
+    "_note": "Установи дату релиза отчётности + 1 день. Формат YYYY-MM-DD. null = фильтр отключён.",
+    "NYSE:JPM": "2026-04-16",
+    "NYSE:BAC": "2026-04-17",
+    "NYSE:GS": "2026-04-15",
+    "NYSE:XOM": "2026-05-04",
+    "NYSE:CVX": "2026-05-04",
+    "NYSE:JNJ": "2026-04-17",
+    "NYSE:PG": "2026-04-25",
+    "NYSE:KO": "2026-05-01",
+    "WMT": "2026-05-20",
+    "NYSE:HD": "2026-05-20"
+  },
+
+  "session": {
+    "timezone": "МСК",
+    "nyse_open": "16:30",
+    "nyse_close": "23:00",
+    "_note": "Лучшее время для запуска сканера: утром до 15:30 МСК (premarket) или после 23:00 МСК (post-close)"
+  }
+}
