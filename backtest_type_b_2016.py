@@ -23,8 +23,8 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # ─── Настройки (те же что v5) ─────────────────────────────────────
-DATA_START  = '2018-01-01'
-TEST_START  = '2020-01-01'
+DATA_START  = '2014-01-01'
+TEST_START  = '2016-01-01'
 TEST_END    = '2026-04-11'
 
 START_BALANCE = 4000.0
@@ -354,7 +354,8 @@ def print_year_table(sim_df, label, ref_final=None):
         pct = (end - start) / start * 100
         print(f"  {yr:<5} {len(g):>4}  {wr:>5.1f}%  ${pnl:>+7,.0f}  {pct:>+6.1f}%  ${end:>8,.0f}")
     total_pct = (account - START_BALANCE) / START_BALANCE * 100
-    cagr = (account / START_BALANCE) ** (1/6.3) - 1
+    years = (pd.Timestamp(TEST_END) - pd.Timestamp(TEST_START)).days / 365.25
+    cagr = (account / START_BALANCE) ** (1/years) - 1
     print(f"  {'-'*55}")
     print(f"  $4,000 → ${account:,.0f}  ({total_pct:+.0f}%)  CAGR {cagr*100:.1f}%/yr")
 
@@ -420,7 +421,6 @@ def main():
     if len(sim_b) > 0:
         print_year_table(sim_b, 'TYPE B (ложный пробой + отскок)')
 
-    # Детали
     if len(dfb) > 0:
         print(f"\n{'='*65}")
         print("  ДЕТАЛИ ПО ПРИЧИНАМ ВЫХОДА")
@@ -440,8 +440,9 @@ def main():
 
     # Сохраняем
     if len(dfb) > 0:
-        dfb.to_csv('d:/projects/trading/signals_type_b.csv', index=False)
-        print(f"\n  Сохранено: signals_type_b.csv ({len(dfb)} сделок)")
+        dfb.to_csv('d:/projects/trading/signals_type_b_2016.csv', index=False)
+        print(f"\n  Сохранено: signals_type_b_2016.csv ({len(dfb)} сделок)")
+        print(f"  Сохранено: signals_combined_2016.csv ({len(dfab)} сделок)")
 
 
 if __name__ == '__main__':

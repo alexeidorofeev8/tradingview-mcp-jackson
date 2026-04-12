@@ -2,7 +2,7 @@
 Sniper Pullback — Ежедневный сканер + Telegram алерты
 
 Запускается автоматически через Windows Task Scheduler каждый будний день в 22:05.
-Находит Type A (проторговка) и Type B (ложный пробой) сигналы.
+Находит Type B (ложный пробой + восстановление) сигналы.
 Сохраняет в journal.csv и отправляет в Telegram.
 """
 import sys, io, os, csv, json, requests, warnings
@@ -31,14 +31,9 @@ ATR_LEN, RS_LEN, VOL_LEN = 14, 63, 20
 SR_LOOKBACK_MIN, SR_LOOKBACK_MAX = 20, 80
 EXCLUDE_SECTORS = {'Real Estate', 'Utilities'}
 
-# Type A
-CONSOL_BARS  = 5
-CONSOL_RANGE = 1.8
-CONSOL_VOL   = 0.8
-
 # Type B
-B_BARS       = 1      # пробой должен быть вчера (не несколько дней назад)
-B_MAX_BREACH = 1.5    # максимальный пробой ниже уровня (%) — апрель 2026: ужесточено с 3.0 до 1.5
+B_MAX_BREACH = 1.5    # максимальный пробой ниже уровня (%)
+B_STOP_BUF   = 0.5    # ATR буфер ниже минимума пробоя
 
 # ─── Вспомогательные ─────────────────────────────────────────────
 def calc_atr(high, low, close, period=14):
@@ -173,13 +168,14 @@ def scan_symbol(sym, df, spx_close, earnings, sector):
         spx    = spx_close.reindex(close.index, method='ffill')
         rs     = (close / close.shift(RS_LEN)) / (spx / spx.shift(RS_LEN))
 
-        c   = close.iloc[-1]
-        a   = atr.iloc[-1]
-        s50 = sma50.iloc[-1]
-        s200= sma200.iloc[-1]
-        vm  = vol_ma.iloc[-1]
-        v   = volume.iloc[-1]
-        o   = open_.iloc[-1]
+        c      = close.iloc[-1]
+        a      = atr.iloc[-1]
+        s50    = sma50.iloc[-1]
+        s200   = sma200.iloc[-1]
+        vm     = vol_ma.iloc[-1]
+        v      = volume.iloc[-1]
+        o      = open_.iloc[-1]
+        yday_l = low.iloc[-2]   # вчерашний минимум (день пробоя)
 
         # Базовые фильтры
         if c < 20 or vm < 500_000 or a/c*100 > 5: return None
@@ -198,109 +194,86 @@ def scan_symbol(sym, df, spx_close, earnings, sector):
         if any(abs((pd.to_datetime(ed).date() - today_d).days) <= 7 for ed in earn_dates):
             return None
 
-        # Уровень SR flip
+        # Уровни
         prior_high = high.shift(SR_LOOKBACK_MIN).rolling(SR_LOOKBACK_MAX - SR_LOOKBACK_MIN).max()
+        local_min  = low.rolling(15).min().shift(1)
+
         ph = prior_high.iloc[-1]
-        if pd.isna(ph): return None
+        lm = local_min.iloc[-1]
 
-        # Pivot low
-        pivot_low = low.rolling(15).min().iloc[-1]
+        if pd.isna(ph) and pd.isna(lm):
+            return None
 
-        results = []
-
-        # ── TYPE A: консолидация + прорыв ────────────────────────
-        dist_sr     = (c - ph) / ph * 100
-        near_sr     = abs(dist_sr) < 2.5
-        dist_pivot  = (c - pivot_low) / pivot_low * 100
-        near_pivot  = abs(dist_pivot) < 2.0
-        dist_sma50  = (c - s50) / s50 * 100
-        near_sma50  = abs(dist_sma50) < 2.0
-
-        if near_sr or near_pivot or near_sma50:
-            recent_high = high.iloc[-CONSOL_BARS:-1]
-            recent_low  = low.iloc[-CONSOL_BARS:-1]
-            consol_range = (recent_high.max() - recent_low.min()) / a
-            tight   = consol_range < CONSOL_RANGE
-            vol_ok  = volume.iloc[-CONSOL_BARS:-1].mean() > vm * CONSOL_VOL
-            green   = c > o and (c - o) / a > 0.25 and v > vm * 1.1
-
-            if green:
-                level_p  = ph if near_sr else (pivot_low if near_pivot else s50)
-                level_t  = 'S/R flip' if near_sr else ('Pivot Low' if near_pivot else 'SMA50')
-                sl       = s50 - 1.5 * a
-                risk     = c - sl
-                if risk > 0:
-                    res = [high.iloc[max(0,len(high)-lb):-1].max()
-                           for lb in [10,20,40,60]
-                           if high.iloc[max(0,len(high)-lb):-1].max() > c*1.01]
-                    tp = min(res) if res else c + risk*2.5
-                    rr = (tp - c) / risk
-                    if rr >= 1.3:
-                        results.append({
-                            'symbol':     sym,
-                            'type':       'A',
-                            'sector':     sector,
-                            'price':      round(c, 2),
-                            'level_price':round(level_p, 2),
-                            'level_type': level_t,
-                            'tight':      tight,
-                            'vol_consol': vol_ok,
-                            'breach_pct': '',
-                            'entry':      round(c * 0.99, 2),
-                            'stop':       round(sl, 2),
-                            'target':     round(tp, 2),
-                            'rr':         round(rr, 2),
-                            'rs':         round(rs_val, 2),
-                        })
+        # Сила восстановления сегодня (обязательный фильтр)
+        strong = c > o and (c - o) / a > 0.5 and v > vm * 1.2
+        if not strong:
+            return None
 
         # ── TYPE B: ложный пробой + восстановление ───────────────
-        recent_lows = low.iloc[-(B_BARS+1):-1]
-        min_low     = recent_lows.min()
-        false_break = (min_low < ph) and (min_low >= ph * (1 - B_MAX_BREACH/100))
+        level_type = None
+        level_val  = None
 
-        if false_break:
-            recovered = c > ph * 0.995
-            strong    = c > o and (c - o) / a > 0.5 and v > vm * 1.2
+        # Ветка 1: prior_high (S/R flip)
+        if not pd.isna(ph):
+            broke_ph     = (yday_l < ph) and (yday_l >= ph * (1 - B_MAX_BREACH / 100))
+            recovered_ph = (c > ph) and (yday_l < ph)
+            if broke_ph and recovered_ph:
+                level_type = 'S/R flip'
+                level_val  = ph
 
-            if strong and recovered:
-                breach_pct = (ph - min_low) / ph * 100
-                sl   = min_low - a * 0.5
-                risk = c - sl
-                if risk > 0:
-                    res = [high.iloc[max(0,len(high)-lb):-1].max()
-                           for lb in [10,20,40,60]
-                           if high.iloc[max(0,len(high)-lb):-1].max() > c*1.01]
-                    tp = min(res) if res else c + risk*2.5
-                    rr = (tp - c) / risk
-                    if rr >= 1.3:
-                        # Не дублируем если уже есть Type A для этого символа
-                        already_a = any(r['symbol'] == sym and r['type'] == 'A' for r in results)
-                        if not already_a:
-                            results.append({
-                                'symbol':     sym,
-                                'type':       'B',
-                                'sector':     sector,
-                                'price':      round(c, 2),
-                                'level_price':round(ph, 2),
-                                'level_type': 'S/R flip',
-                                'tight':      False,
-                                'vol_consol': False,
-                                'breach_pct': round(breach_pct, 2),
-                                'entry':      round(c * 0.99, 2),
-                                'stop':       round(sl, 2),
-                                'target':     round(tp, 2),
-                                'rr':         round(rr, 2),
-                                'rs':         round(rs_val, 2),
-                            })
+        # Ветка 2: local_min (только если prior_high не сработал)
+        if level_type is None and not pd.isna(lm):
+            broke_lm     = (yday_l < lm) and (yday_l >= lm * (1 - B_MAX_BREACH / 100))
+            recovered_lm = (c > lm) and (yday_l < lm)
+            if broke_lm and recovered_lm:
+                level_type = 'Local min'
+                level_val  = lm
 
-        return results if results else None
+        if level_type is None:
+            return None
 
-    except Exception as e:
+        # Стоп и цель
+        breakdown_low = min(yday_l, low.iloc[-3]) if len(low) > 2 else yday_l
+        sl    = breakdown_low - a * B_STOP_BUF
+        entry = c * 0.99
+        risk  = entry - sl
+
+        if risk <= 0:
+            return None
+
+        risk_pct = risk / entry * 100
+        if risk_pct > 15:
+            return None
+
+        tp = entry + risk * 1.5
+        rr = (tp - entry) / risk
+
+        if rr < 1.0:
+            return None
+
+        breach_pct = (level_val - yday_l) / level_val * 100
+
+        return {
+            'symbol':     sym,
+            'type':       'B',
+            'sector':     sector,
+            'price':      round(c, 2),
+            'level_price':round(level_val, 2),
+            'level_type': level_type,
+            'breach_pct': round(breach_pct, 2),
+            'entry':      round(entry, 2),
+            'stop':       round(sl, 2),
+            'target':     round(tp, 2),
+            'rr':         round(rr, 2),
+            'rs':         round(rs_val, 2),
+        }
+
+    except Exception:
         return None
 
 
 # ─── Форматирование Telegram сообщения ───────────────────────────
-def format_message(signals_a, signals_b, spy_price, spy_ma200, today_str):
+def format_message(signals_b, spy_price, spy_ma200, today_str):
     market_ok = spy_price > spy_ma200
     market_line = (
         f"SPY ${spy_price:.0f} > SMA200 ${spy_ma200:.0f} — рынок OK"
@@ -310,17 +283,15 @@ def format_message(signals_a, signals_b, spy_price, spy_ma200, today_str):
 
     lines = [
         f"<b>Sniper Pullback — {today_str}</b>",
-        f"{market_line}",
+        market_line,
         "",
     ]
 
     def fmt_signal(s):
-        rr_str  = f"R:R {s['rr']:.1f}"
-        tight   = " <<TIGHT" if s.get('tight') else ""
-        breach  = f" | пробой {s['breach_pct']}%" if s.get('breach_pct') else ""
+        breach = f" | пробой {s['breach_pct']}%" if s.get('breach_pct') else ""
         return (
-            f"  <b>{s['symbol']}</b> ${s['price']} | уровень ${s['level_price']}"
-            f"{breach} | {rr_str} | RS {s['rs']:.2f}{tight}\n"
+            f"  <b>{s['symbol']}</b> ${s['price']} | {s['level_type']} ${s['level_price']}"
+            f"{breach} | R:R {s['rr']:.1f} | RS {s['rs']:.2f}\n"
             f"   вход ~${s['entry']} | стоп ${s['stop']} | тейк ${s['target']}"
         )
 
@@ -329,19 +300,7 @@ def format_message(signals_a, signals_b, spy_price, spy_ma200, today_str):
         for s in signals_b[:6]:
             lines.append(fmt_signal(s))
     else:
-        lines.append("TYPE B: нет сигналов сегодня")
-
-    lines.append("")
-
-    if signals_a:
-        lines.append(f"<b>TYPE A — проторговка ({len(signals_a)}):</b>")
-        for s in signals_a[:6]:
-            lines.append(fmt_signal(s))
-    else:
-        lines.append("TYPE A: нет сигналов сегодня")
-
-    if not signals_a and not signals_b:
-        lines.append("")
+        lines.append("Сегодня сигналов нет.")
         lines.append("Жди следующего дня.")
 
     return "\n".join(lines)
@@ -361,7 +320,7 @@ def main():
     print(f"SPY: ${spy_price:.2f} | SMA200: ${spy_ma200:.2f} | Market OK: {market_ok}")
 
     if not market_ok:
-        msg = format_message([], [], spy_price, spy_ma200, today_str)
+        msg = format_message([], spy_price, spy_ma200, today_str)
         print("\nРынок ниже SMA200 — сигналы не ищем.")
         send_telegram(msg)
         return
@@ -389,36 +348,26 @@ def main():
 
     # Сканирование
     print("\nСканируем...")
-    all_signals = []
+    signals_b = []
     for sym, df in all_data.items():
         res = scan_symbol(sym, df, spx_close, earnings, sectors.get(sym, ''))
         if res:
-            all_signals.extend(res)
+            signals_b.append(res)
 
-    signals_a = sorted([s for s in all_signals if s['type'] == 'A'],
-                       key=lambda x: -x['rr'])
-    signals_b = sorted([s for s in all_signals if s['type'] == 'B'],
-                       key=lambda x: -x['rr'])
+    signals_b.sort(key=lambda x: -x['rr'])
 
-    print(f"\nType A: {len(signals_a)} сигналов")
-    print(f"Type B: {len(signals_b)} сигналов")
-
-    # Печать в консоль
+    print(f"\nType B: {len(signals_b)} сигналов")
     for s in signals_b[:5]:
-        print(f"  B | {s['symbol']:<6} ${s['price']} | уровень ${s['level_price']} "
+        print(f"  B | {s['symbol']:<6} ${s['price']} | {s['level_type']:<10} ${s['level_price']} "
               f"| пробой {s['breach_pct']}% | R:R {s['rr']} | RS {s['rs']}")
-    for s in signals_a[:5]:
-        print(f"  A | {s['symbol']:<6} ${s['price']} | {s['level_type']:<10} "
-              f"| R:R {s['rr']} | RS {s['rs']}{' <<TIGHT' if s['tight'] else ''}")
 
     # Telegram
-    msg = format_message(signals_a, signals_b, spy_price, spy_ma200, today_str)
+    msg = format_message(signals_b, spy_price, spy_ma200, today_str)
     send_telegram(msg)
 
     # Журнал
-    all_to_save = signals_b[:8] + signals_a[:8]
-    if all_to_save:
-        save_to_journal(all_to_save)
+    if signals_b:
+        save_to_journal(signals_b[:8])
 
     # Сохраняем обновлённый кэш отчётности
     with open(EARNINGS_CACHE, 'w', encoding='utf-8') as f:

@@ -1,7 +1,9 @@
 """
-Sniper Pullback Scanner — находит акции близко к точке входа прямо сейчас
+Sniper Pullback Scanner — Type B
+Ищет акции где ВЧЕРА тень нырнула ниже уровня на 0-1.5%, СЕГОДНЯ закрылись выше.
+Запускать вечером после закрытия рынка.
 """
-import sys, io
+import sys, io, json, os
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
 import yfinance as yf
@@ -12,17 +14,20 @@ import warnings
 warnings.filterwarnings('ignore')
 
 DATA_START = '2023-01-01'
-SMA_FAST, SMA_SLOW = 50, 200
-ATR_LEN = 14
-RS_LEN  = 63
-VOL_LEN = 20
-SR_LOOKBACK_MIN = 20
-SR_LOOKBACK_MAX = 80
-SR_TOUCH_PCT    = 2.5
-CONSOL_BARS     = 5
-CONSOL_RANGE    = 1.8
-CONSOL_VOL_MIN  = 0.8
-EXCLUDE_SECTORS = {'Real Estate', 'Utilities'}
+SMA_FAST, SMA_SLOW   = 50, 200
+ATR_LEN              = 14
+RS_LEN               = 63
+VOL_LEN              = 20
+SR_LOOKBACK_MIN      = 20
+SR_LOOKBACK_MAX      = 80
+B_MAX_BREACH_PCT     = 1.5   # макс пробой ниже уровня (%)
+B_RECOVERY_BODY      = 0.5   # тело свечи восстановления в ATR
+B_RECOVERY_VOL       = 1.2   # объём на восстановлении
+B_STOP_BUFFER        = 0.5   # ATR буфер ниже минимума пробоя
+EXCLUDE_SECTORS      = {'Real Estate', 'Utilities'}
+EARNINGS_CACHE       = 'd:/projects/trading/earnings_cache.json'
+EARNINGS_BUFFER      = 7
+
 
 def get_sp500():
     url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
@@ -30,7 +35,13 @@ def get_sp500():
     resp = requests.get(url, headers=headers, timeout=15)
     df = pd.read_html(io.StringIO(resp.text))[0]
     filtered = df[~df['GICS Sector'].isin(EXCLUDE_SECTORS)]
-    return filtered['Symbol'].str.replace('.', '-', regex=False).tolist()
+    symbols = filtered['Symbol'].str.replace('.', '-', regex=False).tolist()
+    sector_map = dict(zip(
+        filtered['Symbol'].str.replace('.', '-', regex=False),
+        filtered['GICS Sector']
+    ))
+    return symbols, sector_map
+
 
 def calc_atr(high, low, close, period=14):
     tr = pd.concat([high - low,
@@ -38,13 +49,23 @@ def calc_atr(high, low, close, period=14):
                     (low  - close.shift(1)).abs()], axis=1).max(axis=1)
     return tr.ewm(span=period, adjust=False).mean()
 
-def scan_symbol(symbol, df, spx_close):
+
+def load_earnings():
+    if os.path.exists(EARNINGS_CACHE):
+        raw = json.load(open(EARNINGS_CACHE, encoding='utf-8'))
+        return {s: set(v) for s, v in raw.items()}
+    return {}
+
+
+def scan_symbol(symbol, df, spx_close, earnings, sector=None):
     try:
         if len(df) < 220:
             return None
+
         close  = df['Close'].squeeze()
         high   = df['High'].squeeze()
         low    = df['Low'].squeeze()
+        open_  = df['Open'].squeeze()
         volume = df['Volume'].squeeze()
 
         atr    = calc_atr(high, low, close, ATR_LEN)
@@ -52,164 +73,181 @@ def scan_symbol(symbol, df, spx_close):
         sma200 = close.rolling(SMA_SLOW).mean()
         vol_ma = volume.rolling(VOL_LEN).mean()
 
-        # Последние значения
-        c   = close.iloc[-1]
-        a   = atr.iloc[-1]
-        s50 = sma50.iloc[-1]
-        s200= sma200.iloc[-1]
-        vm  = vol_ma.iloc[-1]
-        v   = volume.iloc[-1]
+        # Последние значения (сегодня = -1, вчера = -2)
+        c      = close.iloc[-1]
+        o      = open_.iloc[-1]
+        h      = high.iloc[-1]
+        l      = low.iloc[-1]
+        v      = volume.iloc[-1]
+        a      = atr.iloc[-1]
+        s50    = sma50.iloc[-1]
+        s200   = sma200.iloc[-1]
+        vm     = vol_ma.iloc[-1]
+        yday_l = low.iloc[-2]   # вчерашний минимум (день пробоя)
+        yday_c = close.iloc[-2]
 
-        # Базовые фильтры
-        if c < 20: return None
-        if vm < 500_000: return None
+        # ── Базовые фильтры ──────────────────────────────────────────
+        if c < 20:        return None
+        if vm < 500_000:  return None
         if a/c*100 > 5.0: return None
-        if c < s200: return None
-        if s50 < s200: return None
+        if c < s200:      return None
+        if s50 < s200:    return None
 
-        # SPY market filter
-        spx_aligned = spx_close.reindex(close.index, method='ffill')
-        spx_sma200  = spx_aligned.rolling(SMA_SLOW).mean()
-        if spx_aligned.iloc[-1] < spx_sma200.iloc[-1]:
+        # SPY > SMA200
+        spx = spx_close.reindex(close.index, method='ffill')
+        if spx.iloc[-1] < spx.rolling(SMA_SLOW).mean().iloc[-1]:
             return None
 
-        # RS vs SPX
-        rs_stock = close / close.shift(RS_LEN)
-        rs_spx   = spx_aligned / spx_aligned.shift(RS_LEN)
-        rs_ratio = (rs_stock / rs_spx).iloc[-1]
-        if rs_ratio < 1.0: return None
+        # RS > 1.0
+        rs = (close / close.shift(RS_LEN)) / (spx / spx.shift(RS_LEN))
+        if rs.iloc[-1] < 1.0:
+            return None
 
-        # --- Уровни ---
-        # S/R flip: бывшее сопротивление стало поддержкой
+        # Отчётность
+        today = close.index[-1].date()
+        earn_set = earnings.get(symbol, set())
+        if any(0 <= (pd.to_datetime(ed).date() - today).days <= EARNINGS_BUFFER for ed in earn_set):
+            return None
+
+        # ── Уровни ───────────────────────────────────────────────────
         prior_high = high.shift(SR_LOOKBACK_MIN).rolling(SR_LOOKBACK_MAX - SR_LOOKBACK_MIN).max()
-        dist_sr = (c - prior_high.iloc[-1]) / prior_high.iloc[-1] * 100 if not pd.isna(prior_high.iloc[-1]) else 99
-        near_sr = abs(dist_sr) < SR_TOUCH_PCT
+        local_min  = low.rolling(15).min().shift(1)
 
-        # Pivot Low: локальный минимум 15 баров
-        pivot_low = low.rolling(15).min().iloc[-1]
-        dist_pivot = (c - pivot_low) / pivot_low * 100
-        near_pivot = abs(dist_pivot) < 2.0
+        ph = prior_high.iloc[-1]
+        lm = local_min.iloc[-1]
 
-        # SMA50
-        dist_sma50 = (c - s50) / s50 * 100
-        near_sma50 = abs(dist_sma50) < 2.0
+        if pd.isna(ph) and pd.isna(lm):
+            return None
 
-        at_level = near_sr or near_pivot or near_sma50
-        if not at_level: return None
+        # ── Type B условие ───────────────────────────────────────────
+        # Вчера: тень пробила уровень на 0-1.5%, тело осталось выше (или хотя бы low нырнул)
+        # Сегодня: закрылись ВЫШЕ уровня, сильная зелёная свеча, объём
 
-        # --- Поглощение ---
-        recent_high = high.iloc[-CONSOL_BARS:-1]
-        recent_low  = low.iloc[-CONSOL_BARS:-1]
-        consol_range = (recent_high.max() - recent_low.min()) / a
-        tight = consol_range < CONSOL_RANGE
+        level_type = None
+        level_val  = None
 
-        consol_vol = volume.iloc[-CONSOL_BARS:-1].mean()
-        vol_ok = consol_vol > vm * CONSOL_VOL_MIN
+        # Проверяем prior_high
+        if not pd.isna(ph):
+            broke_ph = (yday_l < ph) and (yday_l >= ph * (1 - B_MAX_BREACH_PCT / 100))
+            recovered_ph = (c > ph) and (yday_l < ph)
+            if broke_ph and recovered_ph:
+                level_type = 'S/R flip'
+                level_val  = ph
 
-        # Уровень (текущая цена vs S/R тип)
-        if near_sr:
-            level_type = "S/R flip"
-            level_dist = dist_sr
-        elif near_pivot:
-            level_type = "Pivot Low"
-            level_dist = dist_pivot
-        else:
-            level_type = "SMA50"
-            level_dist = dist_sma50
+        # Проверяем local_min (только если prior_high не сработал)
+        if level_type is None and not pd.isna(lm):
+            broke_lm = (yday_l < lm) and (yday_l >= lm * (1 - B_MAX_BREACH_PCT / 100))
+            recovered_lm = (c > lm) and (yday_l < lm)
+            if broke_lm and recovered_lm:
+                level_type = 'Local min'
+                level_val  = lm
 
-        # Найти ближайшее сопротивление (тейк)
-        res_candidates = []
+        if level_type is None:
+            return None
+
+        # ── Свеча восстановления ─────────────────────────────────────
+        green       = c > o
+        body_ok     = (c - o) / a > B_RECOVERY_BODY
+        vol_ok      = v > vm * B_RECOVERY_VOL
+
+        if not green or not body_ok:
+            return None
+
+        # ── Стоп и цель ──────────────────────────────────────────────
+        breakdown_low = min(yday_l, low.iloc[-3]) if len(low) > 2 else yday_l
+        sl = breakdown_low - a * B_STOP_BUFFER
+
+        entry = c * 0.99  # приблизительный вход (интрадей завтра)
+        risk  = entry - sl
+        if risk <= 0 or risk / entry > 0.15:
+            return None
+
+        # Ближайшее сопротивление
+        tp_candidates = []
         for lb in [10, 20, 40, 60]:
-            start = max(0, len(high) - lb)
-            res = high.iloc[start:-1].max()
-            if res > c * 1.01:
-                res_candidates.append(res)
-        if res_candidates:
-            tp = min(res_candidates)
-            sl = s50 - 1.5 * a
-            risk = c - sl
-            reward = tp - c
-            rr = reward / risk if risk > 0 else 0
-        else:
-            tp = 0
-            rr = 0
+            res = high.iloc[max(0, len(high)-lb):-1].max()
+            if res > entry * 1.01:
+                tp_candidates.append(res)
+        tp = min(tp_candidates) if tp_candidates else entry + risk * 3.0
+        rr = (tp - entry) / risk
 
-        # Скор
-        score = 0
-        if near_sr:     score += 30
-        elif near_pivot: score += 20
-        elif near_sma50: score += 10
-        if tight:        score += 20
-        if vol_ok:       score += 15
-        score += min(int((rs_ratio - 1.0) * 100), 20)
-        if rr >= 2.0:    score += 15
+        if rr < 1.0:
+            return None
 
-        tight_str = "<<TIGHT" if tight else ""
+        breach_pct = (level_val - yday_l) / level_val * 100
+
         return {
-            'symbol':     symbol,
-            'price':      round(c, 2),
-            'level':      level_type,
-            'dist_%':     round(level_dist, 1),
-            'consol_atr': round(consol_range, 1),
-            'tight':      tight_str,
-            'vol_ok':     "Y" if vol_ok else "N",
-            'RS':         round(rs_ratio, 2),
-            'SMA50':      round(s50, 2),
-            'TP':         round(tp, 2),
-            'SL':         round(s50 - 1.5 * a, 2),
-            'R:R':        round(rr, 1),
-            'score':      score,
+            'symbol':    symbol,
+            'price':     round(c, 2),
+            'level':     level_type,
+            'level_$':   round(level_val, 2),
+            'breach%':   round(breach_pct, 2),
+            'yday_low':  round(yday_l, 2),
+            'vol_ok':    'Y' if vol_ok else 'n',
+            'RS':        round(rs.iloc[-1], 2),
+            'entry~':    round(entry, 2),
+            'SL':        round(sl, 2),
+            'TP':        round(tp, 2),
+            'R:R':       round(rr, 1),
+            'risk%':     round(risk / entry * 100, 1),
         }
-    except Exception as e:
+
+    except Exception:
         return None
 
+
 def main():
-    print("=== Sniper Pullback Scanner — сегодня ===\n")
+    print("=== Type B Scanner — ложный пробой + восстановление ===\n")
 
-    symbols = get_sp500()
-    print(f"Загружаем данные для {len(symbols)} акций...\n")
+    symbols, sector_map = get_sp500()
+    earnings = load_earnings()
+    print(f"Акций в S&P500: {len(symbols)}")
 
-    # SPY для фильтра рынка и RS
-    spx_raw = yf.download('SPY', start=DATA_START, progress=False, auto_adjust=True)
+    spx_raw   = yf.download('SPY', start=DATA_START, progress=False, auto_adjust=True)
     spx_close = spx_raw['Close'].squeeze()
 
-    # Скачиваем батчами
-    batch_size = 50
+    # Проверка рынка
+    if spx_close.iloc[-1] < spx_close.rolling(SMA_SLOW).mean().iloc[-1]:
+        print("⚠️  SPY ниже SMA200 — рынок не в восходящем тренде. Сигналов нет.")
+        return
+
+    print("Загружаем котировки...\n")
     all_data = {}
-    for i in range(0, len(symbols), batch_size):
-        batch = symbols[i:i+batch_size]
-        raw = yf.download(batch, start=DATA_START, progress=False, auto_adjust=True, group_by='ticker')
+    for i in range(0, len(symbols), 50):
+        batch = symbols[i:i+50]
+        raw = yf.download(batch, start=DATA_START, progress=False,
+                          auto_adjust=True, group_by='ticker')
         for sym in batch:
             try:
-                if len(batch) == 1:
-                    all_data[sym] = raw
-                else:
-                    all_data[sym] = raw[sym].dropna()
+                all_data[sym] = raw[sym].dropna() if len(batch) > 1 else raw.dropna()
             except:
                 pass
-        print(f"  Загружено {min(i+batch_size, len(symbols))}/{len(symbols)}...", flush=True)
+        print(f"  {min(i+50, len(symbols))}/{len(symbols)}...", end=' ', flush=True)
+    print()
 
     print("\nСканируем...\n")
     results = []
     for sym, df in all_data.items():
-        r = scan_symbol(sym, df, spx_close)
+        r = scan_symbol(sym, df, spx_close, earnings, sector_map.get(sym))
         if r:
             results.append(r)
 
     if not results:
-        print("Нет сетапов сегодня.")
+        print("Сегодня сетапов Type B нет.")
         return
 
-    df_res = pd.DataFrame(results).sort_values('score', ascending=False)
+    df_res = pd.DataFrame(results).sort_values('R:R', ascending=False)
 
-    print(f"Найдено сетапов: {len(df_res)}\n")
-    print("=" * 90)
-    print(f"{'Sym':<6} {'Price':>7} {'Level':<10} {'Dist%':>6} {'Consol':>6} {'Tight':<7} {'VolOK':>5} {'RS':>5} {'TP':>7} {'SL':>7} {'R:R':>5} {'Score':>6}")
-    print("-" * 90)
-    for _, r in df_res.head(25).iterrows():
-        print(f"{r['symbol']:<6} {r['price']:>7.2f} {r['level']:<10} {r['dist_%']:>+6.1f}% {r['consol_atr']:>6.1f} {r['tight']:<7} {r['vol_ok']:>5} {r['RS']:>5.2f} {r['TP']:>7.2f} {r['SL']:>7.2f} {r['R:R']:>5.1f} {r['score']:>6}")
-    print("=" * 90)
-    print("\nLegend: Dist% = насколько далеко от уровня | Consol = ширина проторговки в ATR (< 1.8 = TIGHT) | Score = суммарный балл")
+    print(f"Найдено сетапов Type B: {len(df_res)}\n")
+    print("=" * 100)
+    print(f"{'Sym':<6} {'Price':>7} {'Уровень':<10} {'Level$':>8} {'Пробой%':>8} {'YdayLow':>8} {'Vol':>4} {'RS':>5} {'Вход~':>7} {'SL':>7} {'TP':>7} {'R:R':>5} {'Risk%':>6}")
+    print("-" * 100)
+    for _, r in df_res.iterrows():
+        print(f"{r['symbol']:<6} {r['price']:>7.2f} {r['level']:<10} {r['level_$']:>8.2f} {r['breach%']:>7.2f}% {r['yday_low']:>8.2f} {r['vol_ok']:>4} {r['RS']:>5.2f} {r['entry~']:>7.2f} {r['SL']:>7.2f} {r['TP']:>7.2f} {r['R:R']:>5.1f} {r['risk%']:>5.1f}%")
+    print("=" * 100)
+    print("\nПодсказка: Vol=Y означает объём >1.2x среднего. Вход~ = приблизительно (интрадей).")
+    print("Завтра в 15:30 Берлин открой часовик этих акций и входи когда цена держится выше уровня.")
+
 
 if __name__ == '__main__':
     main()
