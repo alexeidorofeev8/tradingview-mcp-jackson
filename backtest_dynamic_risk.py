@@ -22,10 +22,10 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # ─── Настройки ────────────────────────────────────────────────────
-DATA_START  = '2022-01-01'
-TEST_START  = '2025-01-01'
-TEST_END    = '2025-12-31'
-TEST_YEARS  = 1.0   # для расчёта CAGR
+DATA_START  = '2007-01-01'
+TEST_START  = '2010-01-01'
+TEST_END    = '2026-04-11'
+TEST_YEARS  = 16.3
 
 START_BALANCE = 10_000.0
 COMMISSION    = 2.0
@@ -197,28 +197,44 @@ def run_symbol(sym, df_stock, spx_close, earnings):
         return []
 
 
-# ─── Динамический риск ───────────────────────────────────────────
-def get_dynamic_risk(n_open):
-    """2% если мало позиций → 1% если много"""
-    if n_open <= 1:
-        return 0.02
-    elif n_open <= 3:
-        return 0.015
-    else:
+# ─── Варианты динамического риска ────────────────────────────────
+def get_risk(n_open, deployed_ratio, mode):
+    """
+    n_open:        число открытых позиций
+    deployed_ratio: доля занятой маржи (0.0–1.0)
+    mode:          вариант расчёта риска
+    """
+    if mode == 'flat_1':
         return 0.01
+    elif mode == 'flat_2':
+        return 0.02
+    elif mode == 'dynamic':       # оригинал: 2→1.5→1 по слотам
+        if n_open <= 1:   return 0.02
+        elif n_open <= 3: return 0.015
+        else:             return 0.01
+    elif mode == 'varA':          # поднять пол: 2→1.5→1.5
+        if n_open <= 1:   return 0.02
+        elif n_open <= 3: return 0.015
+        else:             return 0.015
+    elif mode == 'varB':          # сдвинуть вверх: 2.5→2→1.5
+        if n_open <= 1:   return 0.025
+        elif n_open <= 3: return 0.02
+        else:             return 0.015
+    elif mode == 'varC':          # дольше держать 2%: 2→2→1.5
+        if n_open <= 3:   return 0.02
+        else:             return 0.015
+    elif mode == 'margin':        # по остатку маржи
+        if deployed_ratio < 0.30:   return 0.02
+        elif deployed_ratio < 0.60: return 0.015
+        else:                       return 0.01
+    return 0.01
 
 
 # ─── Симуляция счёта ─────────────────────────────────────────────
 def simulate(trades_df, mode='dynamic', leverage=2.0):
-    """
-    mode:     'flat_1' | 'flat_2' | 'dynamic'
-    leverage: overnight плечо (2.0 = buying power = 2x equity)
-              пропускаем сделку если нет места по капиталу
-    """
     df = trades_df.sort_values('date').copy()
     account  = START_BALANCE
-    # open_pos: список (дата_выхода, размер_позиции_в_$)
-    open_pos = []
+    open_pos = []   # (дата_выхода, размер_позиции_$)
     rows     = []
     n_open_log  = []
     skipped_lev = 0
@@ -228,20 +244,14 @@ def simulate(trades_df, mode='dynamic', leverage=2.0):
         x_date = e_date + pd.Timedelta(days=int(t['days']) + 1)
         open_pos = [(d, ps) for d, ps in open_pos if d > e_date]
 
-        n_open   = len(open_pos)
-        deployed = sum(ps for _, ps in open_pos)
+        n_open         = len(open_pos)
+        deployed       = sum(ps for _, ps in open_pos)
+        max_deployed   = account * leverage
+        deployed_ratio = deployed / max_deployed if max_deployed > 0 else 0
 
-        if mode == 'flat_1':
-            risk_pct = 0.01
-        elif mode == 'flat_2':
-            risk_pct = 0.02
-        else:
-            risk_pct = get_dynamic_risk(n_open)
-
+        risk_pct = get_risk(n_open, deployed_ratio, mode)
         pos_size = (account * risk_pct) / (t['risk_pct'] / 100)
 
-        # Проверяем: хватает ли маржи (buying power = equity × leverage)
-        max_deployed = account * leverage
         if deployed + pos_size > max_deployed:
             skipped_lev += 1
             continue
@@ -258,12 +268,10 @@ def simulate(trades_df, mode='dynamic', leverage=2.0):
             'symbol':    t['symbol'],
             'win':       t['win'],
             'n_open':    n_open,
-            'deployed':  round(deployed, 0),
-            'pos_size':  round(pos_size, 0),
             'risk_used': risk_pct,
         })
 
-    df_out = pd.DataFrame(rows)
+    df_out    = pd.DataFrame(rows)
     avg_slots = np.mean(n_open_log) if n_open_log else 0
     return df_out, account, avg_slots, skipped_lev
 
@@ -295,7 +303,7 @@ def print_year_table(sim_df, label):
     total_pct = (account - START_BALANCE) / START_BALANCE * 100
     cagr = (account / START_BALANCE) ** (1 / TEST_YEARS) - 1
     mdd  = max_drawdown(sim_df)
-    avg_slots = sim_df['n_open'].mean()
+    avg_slots = sim_df['n_open'].mean() if 'n_open' in sim_df.columns else 0
     print(f"  {'-'*58}")
     print(f"  $10k → ${account:,.0f}  ({total_pct:+.0f}%)  CAGR {cagr*100:.1f}%  MaxDD {mdd:.1f}%  avgSlots {avg_slots:.1f}")
 
@@ -352,39 +360,96 @@ def main():
     dfb['date'] = pd.to_datetime(dfb['date'])
     dfb = dfb.sort_values('date').reset_index(drop=True)
 
-    print(f"\nШаг 6: Симуляция трёх вариантов...")
+    print(f"\nШаг 6: Полный перебор вариантов...")
 
-    sim1, final1, slots1, skip1 = simulate(dfb, mode='flat_1',   leverage=2.0)
-    sim2, final2, slots2, skip2 = simulate(dfb, mode='flat_2',   leverage=2.0)
-    simd, finald, slotsd, skipd = simulate(dfb, mode='dynamic',  leverage=2.0)
+    # ─── Grid search ──────────────────────────────────────────────
+    # Уровни риска
+    risk_levels = [0.01, 0.015, 0.02, 0.025, 0.03]
+    # Пороги по числу позиций
+    thresh_pairs = [(1,3), (1,4), (2,4), (2,5), (3,5)]
 
-    # ─── Итоговая сравнительная таблица ───────────────────────────
-    print(f"\n{'='*68}")
-    print(f"  ИТОГ: $10,000 → ?  (2016–2026, ~{TEST_YEARS:.0f} лет)")
-    print(f"{'='*68}")
-    print(f"  {'Вариант':<20} {'Итог':>10} {'CAGR':>7} {'MaxDD':>7} {'avgSlots':>10} {'Сделок':>8}")
-    print(f"  {'-'*62}")
+    results = []
 
-    for label, sim_df, final, slots, skip in [
-        ('flat 1% (базовый)',  sim1, final1, slots1, skip1),
-        ('dynamic 2→1.5→1%', simd, finald, slotsd, skipd),
-    ]:
+    # Базовые
+    for mode in ('flat_1', 'flat_2'):
+        sim, final, slots, skip = simulate(dfb, mode=mode, leverage=2.0)
         cagr = (final / START_BALANCE) ** (1 / TEST_YEARS) - 1
-        mdd  = max_drawdown(sim_df)
-        print(f"  {label:<20} ${final:>9,.0f}  {cagr*100:>5.1f}%  {mdd:>6.1f}%  {slots:>8.1f}  {len(sim_df):>7}  skip={skip}")
+        mdd  = max_drawdown(sim)
+        label = 'flat 1%' if mode == 'flat_1' else 'flat 2%'
+        results.append({'label': label, 'final': final, 'cagr': cagr*100,
+                        'mdd': mdd, 'trades': len(sim), 'skip': skip})
 
-    # ─── Детальные таблицы по годам ───────────────────────────────
-    print_year_table(sim1, 'FLAT 1% (базовый)')
-    print_year_table(simd, 'DYNAMIC: 2% → 1.5% → 1%')
+    # Вариант по марже
+    sim, final, slots, skip = simulate(dfb, mode='margin', leverage=2.0)
+    cagr = (final / START_BALANCE) ** (1 / TEST_YEARS) - 1
+    mdd  = max_drawdown(sim)
+    results.append({'label': 'margin-based', 'final': final, 'cagr': cagr*100,
+                    'mdd': mdd, 'trades': len(sim), 'skip': skip})
 
-    # ─── Распределение риска в dynamic ────────────────────────────
-    print(f"\n{'='*68}")
-    print("  DYNAMIC: распределение использованного риска")
-    print(f"{'='*68}")
-    counts = simd['risk_used'].value_counts().sort_index()
-    total  = len(simd)
-    for r, cnt in counts.items():
-        print(f"  {r*100:.1f}% риск: {cnt:>5} сделок ({cnt/total*100:.0f}%)")
+    # Перебор: 3 уровня риска + 2 порога
+    def simulate_grid(trades_df, r_high, r_mid, r_low, t1, t2, leverage=2.0):
+        df = trades_df.sort_values('date').copy()
+        account, open_pos, rows, skipped = START_BALANCE, [], [], 0
+        for _, t in df.iterrows():
+            e_date = pd.to_datetime(t['date'])
+            x_date = e_date + pd.Timedelta(days=int(t['days']) + 1)
+            open_pos = [(d, ps) for d, ps in open_pos if d > e_date]
+            n = len(open_pos)
+            deployed = sum(ps for _, ps in open_pos)
+            max_dep  = account * leverage
+            if n <= t1:       r = r_high
+            elif n <= t2:     r = r_mid
+            else:             r = r_low
+            pos = (account * r) / (t['risk_pct'] / 100)
+            if deployed + pos > max_dep:
+                skipped += 1; continue
+            pnl = pos * (t['pnl_pct'] / 100) - COMMISSION
+            account += pnl
+            open_pos.append((x_date, pos))
+            rows.append({'date': t['date'], 'pnl_$': pnl, 'account': account,
+                         'win': t['win']})
+        return pd.DataFrame(rows), account, skipped
+
+    best_cagr = 0
+    combos = []
+    for rh in risk_levels:
+        for rm in risk_levels:
+            for rl in risk_levels:
+                if not (rh >= rm >= rl): continue   # high ≥ mid ≥ low
+                if rh == rm == rl: continue          # не flat
+                for t1, t2 in thresh_pairs:
+                    sim, final, skip = simulate_grid(dfb, rh, rm, rl, t1, t2)
+                    if len(sim) == 0: continue
+                    cagr = (final / START_BALANCE) ** (1 / TEST_YEARS) - 1
+                    mdd  = max_drawdown(sim)
+                    label = f'{rh*100:.0f}→{rm*100:.0f}→{rl*100:.0f}% t≤{t1}/≤{t2}'
+                    combos.append({'label': label, 'final': final, 'cagr': cagr*100,
+                                   'mdd': mdd, 'trades': len(sim), 'skip': skip,
+                                   'rh': rh, 'rm': rm, 'rl': rl, 't1': t1, 't2': t2})
+
+    # Топ-5 по CAGR
+    combos.sort(key=lambda x: x['cagr'], reverse=True)
+    # сохраняем параметры лучшего
+    for c in combos:
+        c['is_best'] = False
+    combos[0]['is_best'] = True
+    results += combos[:5]
+
+    # ─── Итоговая таблица ─────────────────────────────────────────
+    print(f"\n{'='*80}")
+    print(f"  ИТОГ: $10k → ?  (2010–2026, ~{TEST_YEARS:.0f} лет, плечо 2x)")
+    print(f"{'='*80}")
+    print(f"  {'Вариант':<32} {'Итог':>12} {'CAGR':>7} {'MaxDD':>7} {'Сделок':>7} {'Пропущено':>10}")
+    print(f"  {'-'*75}")
+    for r in results:
+        marker = ' ◀ ЛУЧШИЙ' if r == combos[0] else ''
+        print(f"  {r['label']:<32} ${r['final']:>11,.0f}  {r['cagr']:>5.1f}%  {r['mdd']:>6.1f}%  {r['trades']:>6}  {r['skip']:>9}{marker}")
+
+    # ─── Детальный год по лучшему ─────────────────────────────────
+    best = combos[0]
+    sim_best, _, _ = simulate_grid(dfb, best['rh'], best['rm'], best['rl'],
+                                   best['t1'], best['t2'])
+    print_year_table(sim_best, f"ЛУЧШИЙ: {best['label']}")
 
     # Сохраняем сигналы
     dfb.to_csv('d:/projects/trading/signals_dynamic_risk.csv', index=False)
